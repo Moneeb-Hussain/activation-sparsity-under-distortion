@@ -1,0 +1,17 @@
+frame_id,timestamp_sec,text_score,preliminary_label,is_diagram,rectangles,line_segments,structural_components,small_components,edge_density,reason
+frame-0001,3.0,4,not_useful,False,0,0,0,0,0.0219,0 rectangular nodes (need 2); edge density 0.022 (floor 0.002)
+frame-0003,15.0,4,not_useful,False,0,4,0,11,0.025,0 rectangular nodes (need 2); edge density 0.025 (floor 0.002)
+frame-0004,41.0,4,useful_diagram,False,0,13,0,25,0.0571,0 rectangular nodes (need 2); edge density 0.057 (floor 0.002)
+frame-0010,67.0,2,useful_diagram,False,1,8,0,16,0.0289,1 rectangular nodes (need 2); edge density 0.029 (floor 0.002)
+frame-0011,69.0,2,useful_diagram,True,3,22,0,23,0.0489,3 rectangular nodes (need 2) and edge density 0.049
+frame-0012,75.0,6,useful_diagram,True,3,25,0,25,0.0528,3 rectangular nodes (need 2) and edge density 0.053
+frame-0037,189.0,2,not_useful,False,0,5,0,13,0.0331,0 rectangular nodes (need 2); edge density 0.033 (floor 0.002)
+frame-0039,195.0,2,useful_diagram,False,0,7,0,14,0.0259,0 rectangular nodes (need 2); edge density 0.026 (floor 0.002)
+frame-0040,209.0,3,useful_diagram,False,1,23,0,32,0.0495,1 rectangular nodes (need 2); edge density 0.050 (floor 0.002)
+frame-0041,217.0,5,useful_diagram,False,1,32,0,58,0.0715,1 rectangular nodes (need 2); edge density 0.071 (floor 0.002)
+frame-0044,243.0,6,not_useful,False,0,1,0,2,0.0097,0 rectangular nodes (need 2); edge density 0.010 (floor 0.002)
+frame-0055,285.0,6,useful_diagram,False,1,8,1,13,0.0408,1 rectangular nodes (need 2); edge density 0.041 (floor 0.002)
+frame-0058,305.0,3,not_useful,False,0,5,0,13,0.0364,0 rectangular nodes (need 2); edge density 0.036 (floor 0.002)
+frame-0071,375.0,4,software_demo,False,0,1,0,2,0.0135,0 rectangular nodes (need 2); edge density 0.014 (floor 0.002)
+frame-0087,473.0,2,not_useful,False,0,4,0,10,0.0216,0 rectangular nodes (need 2); edge density 0.022 (floor 0.002)
+frame-0093,499.0,6,not_useful,False,0,1,0,3,0.0276,0 rectangular nodes (need 2); edge density 0.028 (floor 0.002)

@@ -1,8 +1,10 @@
 """Step 4B: run build-time Claude vision over the Step 4A vision candidates.
 
 Reads the committed Step 4A artifact (frame_analysis.json) and runs ONE Claude vision call
-per DETERMINISTIC candidate -- only frames where ``isVisionCandidate`` and ``isRepresentative``
-are both true, never the non-candidates. Each frame yields AT MOST ONE
+per representative that clears the text gate. With no ``--min-text-score``, the manifest and
+frame_analysis thresholds must agree, and ``isVisionCandidate`` must match that gate. An
+explicit flag overrides both and re-selects from stored ``textScore`` values. Each frame yields
+AT MOST ONE
 VisualBlock (the single most salient artifact), and the extracted blocks are committed to:
 
     data/demo/GDm_uH6VxPY/visual_blocks.json
@@ -22,12 +24,19 @@ Hints (CONTEXT ONLY -- the image is ground truth): each call is given that frame
 ``ocrText`` and ``candidateReason`` plus nearby transcript. The model is told to correct/
 complete the OCR, never copy it verbatim (OCR is noisy/truncated).
 
+``--min-text-score`` (default: the threshold recorded in frame_analysis.json, else 8)
+chooses vision candidates from stored textScore values. Representative frames are not
+rebuilt. A non-default threshold will not overwrite the committed visual_blocks.json;
+pass --output. Running this script calls the vision API for candidates that are not
+already cached.
+
 Run from the repo root (needs ANTHROPIC_API_KEY in env or .env):
-    python scripts/build_visual_blocks.py  [--force]
+    python scripts/build_visual_blocks.py  [--force] [--min-text-score 8]
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -36,7 +45,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from app.frame_select import phash_distance  # noqa: E402
+from app.frame_select import (  # noqa: E402
+    MIN_TEXT_SCORE,
+    passes_text_gate,
+    phash_distance,
+    require_min_text_score,
+    resolve_min_text_score,
+)
 from app.vision import (  # noqa: E402
     DEFAULT_MODEL,
     VALID_CONFIDENCE,
@@ -143,11 +158,105 @@ def nearby_transcript(segments: list[dict], ts: float, window: float = TRANSCRIP
     ).strip()
 
 
-def select_candidates(analysis: dict) -> list[dict]:
-    """The Step 4A vision candidates ONLY: representatives that cleared the text gate."""
+def positive_int(value: str) -> int:
+    try:
+        return require_min_text_score(int(value))
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("min text score must be a positive integer") from None
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run build-time vision on text-gate candidates.")
+    parser.add_argument("--force", action="store_true", help="re-call every candidate; ignore the cache")
+    parser.add_argument(
+        "--min-text-score", type=positive_int, default=None,
+        help=f"OCR threshold (default: frame_analysis params.minTextScore, else {MIN_TEXT_SCORE})",
+    )
+    parser.add_argument(
+        "--output", type=Path, default=None,
+        help="visual-blocks JSON path (default: committed visual_blocks.json)",
+    )
+    return parser
+
+
+def resolve_blocks_output(min_text_score: int, output: Path | None) -> Path:
+    """Refuse to replace the committed blocks when the gate is not the default 8."""
+    dest = BLOCKS_PATH if output is None else Path(output)
+    if int(min_text_score) != MIN_TEXT_SCORE and dest.resolve() == BLOCKS_PATH.resolve():
+        raise SystemExit(
+            "refusing to overwrite committed visual_blocks.json at a non-default threshold; pass --output"
+        )
+    return dest.resolve()
+
+
+def _recorded_score(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return require_min_text_score(int(value))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"invalid recorded minTextScore: {exc}") from None
+
+
+def resolve_vision_gate(manifest: dict, analysis: dict, cli_value: int | None) -> int:
+    """Return the gate to apply. Refuse a silent mix of stale recorded thresholds.
+
+    An explicit ``cli_value`` wins. Otherwise, if both the manifest and frame_analysis
+    record a threshold they must be equal, and every representative's ``isVisionCandidate``
+    must match ``textScore`` at that gate.
+    """
+    manifest_score = _recorded_score((manifest.get("selection") or {}).get("minTextScore"))
+    analysis_score = _recorded_score((analysis.get("params") or {}).get("minTextScore"))
+    if cli_value is None and manifest_score is not None and analysis_score is not None:
+        if manifest_score != analysis_score:
+            raise SystemExit(
+                f"manifest selection.minTextScore={manifest_score} but "
+                f"frame_analysis params.minTextScore={analysis_score}. "
+                "Rerun scripts/analyze_demo_frames.py so they match, or pass --min-text-score."
+            )
+    floor = resolve_min_text_score(cli_value, analysis_score if analysis_score is not None else manifest_score)
+    if cli_value is None:
+        stale = []
+        for frame in analysis.get("frames") or []:
+            if not frame.get("isRepresentative"):
+                continue
+            expected = passes_text_gate(int(frame.get("textScore") or 0), floor)
+            if bool(frame.get("isVisionCandidate")) != expected:
+                stale.append(frame.get("id"))
+        if stale:
+            shown = ", ".join(str(item) for item in stale[:5])
+            raise SystemExit(
+                f"frame_analysis isVisionCandidate does not match textScore >= {floor} "
+                f"({len(stale)} frame(s): {shown}). "
+                "Rerun scripts/analyze_demo_frames.py or pass --min-text-score."
+            )
+    return floor
+
+
+def gate_reason(frame: dict, floor: int) -> str:
+    """Use the stored reason when it matches this gate. Otherwise describe this gate."""
+    score = int(frame.get("textScore") or 0)
+    selected = passes_text_gate(score, floor)
+    if bool(frame.get("isVisionCandidate")) == selected and frame.get("candidateReason"):
+        return frame["candidateReason"]
+    if selected:
+        return (f"representative with {score} confident on-screen words "
+                f"(>= {floor}); vision candidate")
+    return (f"representative but only {score} confident words "
+            f"(< {floor}); below text gate, skipped")
+
+
+def select_candidates(analysis: dict, min_text_score: int | None = None) -> list[dict]:
+    """Representatives whose stored textScore clears the gate.
+
+    ``min_text_score`` overrides the value recorded in ``analysis["params"]``.
+    The default recorded value is 8. Frame ids, timestamps, and paths are not rewritten.
+    """
+    recorded = (analysis.get("params") or {}).get("minTextScore")
+    floor = resolve_min_text_score(min_text_score, recorded)
     return [
-        f for f in analysis["frames"]
-        if f.get("isVisionCandidate") and f.get("isRepresentative")
+        frame for frame in analysis["frames"]
+        if frame.get("isRepresentative") and passes_text_gate(int(frame.get("textScore") or 0), floor)
     ]
 
 
@@ -202,7 +311,8 @@ def preview(text: str | None, n: int = 70) -> str:
 
 
 def main() -> None:
-    force = "--force" in sys.argv[1:]
+    args = build_parser().parse_args()
+    force = args.force
     for path in (MANIFEST_PATH, ANALYSIS_PATH, TRANSCRIPT_PATH):
         if not path.exists():
             raise SystemExit(f"missing artifact {path} -- run Steps 3B-prep / 4A first")
@@ -213,7 +323,9 @@ def main() -> None:
     segments = transcript["segments"]
     frame_ids = {f["id"] for f in manifest["frames"]}
 
-    candidates = select_candidates(analysis)
+    min_text_score = resolve_vision_gate(manifest, analysis, args.min_text_score)
+    output_path = resolve_blocks_output(min_text_score, args.output)
+    candidates = select_candidates(analysis, min_text_score)
     if not candidates:
         raise SystemExit("no vision candidates in frame_analysis.json -- rerun Step 4A")
     # Every candidate must be a real frame; we only ever process these.
@@ -271,7 +383,7 @@ def main() -> None:
             disk_path,
             transcript_context=ctx,
             ocr_hint=cand.get("ocrText", ""),
-            candidate_reason=cand.get("candidateReason", ""),
+            candidate_reason=gate_reason(cand, min_text_score),
         )
         dt = time.perf_counter() - t0
         calls += 1
@@ -304,6 +416,7 @@ def main() -> None:
         "params": {
             "transcriptWindowSec": TRANSCRIPT_WINDOW_SEC,
             "atMostOneBlockPerFrame": True,
+            "minTextScore": min_text_score,
         },
         "counts": {
             "candidates": len(candidates),
@@ -315,7 +428,7 @@ def main() -> None:
         },
         "blocks": blocks,
     }
-    BLOCKS_PATH.write_text(json.dumps(out, indent=2) + "\n")
+    output_path.write_text(json.dumps(out, indent=2) + "\n")
 
     est = estimate_cost_usd([b for b in blocks if b.get("inputTokens")])
     print("\n=== summary ===")
@@ -328,7 +441,11 @@ def main() -> None:
     if calls:
         print(f"  latency:           {total_latency:.1f}s total, {total_latency / calls:.1f}s/call avg")
     print(f"  est. cost:         ~${est:.4f} (approx, Sonnet list pricing on captured usage)")
-    print(f"  wrote:             {BLOCKS_PATH.relative_to(REPO_ROOT)}")
+    try:
+        shown = output_path.relative_to(REPO_ROOT)
+    except ValueError:
+        shown = output_path
+    print(f"  wrote:             {shown}")
     by_type: dict[str, int] = {}
     for b in successes:
         by_type[b["type"]] = by_type.get(b["type"], 0) + 1

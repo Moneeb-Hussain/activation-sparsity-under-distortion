@@ -23,11 +23,16 @@ This runs LOCALLY (residential IP) and writes:
 It reuses the committed transcript.json (same video) and the gitignored downloaded video / dense
 frames if already present (resume). It resets ONLY static/demo/<id>/frames -- never other data.
 
-Run from the repo root:  python scripts/create_demo_artifacts.py
+The text gate does not choose representatives. ``--min-text-score`` (default 8) only
+records which representatives are vision candidates. Representative ids, timestamps,
+and dedup are unchanged.
+
+Run from the repo root:  python scripts/create_demo_artifacts.py [--min-text-score 8]
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import subprocess
@@ -48,6 +53,9 @@ from app.frame_select import (  # noqa: E402
     collapse_adjacent_reps,
     compute_phash,
     ocr_signals,
+    passes_text_gate,
+    require_min_text_score,
+    resolve_min_text_score,
     segment,
     segmentation_phash,
 )
@@ -212,7 +220,31 @@ def make_contact_sheet(frames: list[dict], out_path: Path, cols: int = 6) -> Non
     sheet.save(out_path, "JPEG", quality=80)
 
 
+def positive_int(value: str) -> int:
+    try:
+        return require_min_text_score(int(value))
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("min text score must be a positive integer") from None
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Build the committed representative frame pack.")
+    parser.add_argument(
+        "--min-text-score", type=positive_int, default=None,
+        help=f"vision-candidate OCR threshold recorded in the manifest (default {MIN_TEXT_SCORE})",
+    )
+    return parser
+
+
+def text_gate_candidates(reps: list[dict], min_text_score: int = MIN_TEXT_SCORE) -> list[dict]:
+    """Representatives that clear the text gate. Does not remove anyone from ``reps``."""
+    floor = require_min_text_score(min_text_score)
+    return [rep for rep in reps if passes_text_gate(rep["textScore"], floor)]
+
+
 def main() -> None:
+    args = build_parser().parse_args()
+    min_text_score = resolve_min_text_score(args.min_text_score)
     if parse_video_id(VIDEO_URL) != VIDEO_ID:
         raise SystemExit(f"video id mismatch for {VIDEO_URL}")
 
@@ -228,7 +260,7 @@ def main() -> None:
     recs = dense_signals(dense)
     reps, drops = select_representatives(recs)
     by_id = {r["id"]: r for r in recs}
-    candidates = [r for r in reps if r["textScore"] >= MIN_TEXT_SCORE]
+    candidates = text_gate_candidates(reps, min_text_score)
     print(f"[select] {len(dense)} dense -> {max(r['segmentId'] for r in recs) + 1} segments "
           f"-> {len(reps)} representatives ({len(drops)} folded) -> {len(candidates)} pass the text gate")
 
@@ -265,6 +297,7 @@ def main() -> None:
             "denseFrameCount": len(dense), "segThreshold": SEGMENT_PHASH_THRESHOLD,
             "slideRegionFrac": SLIDE_REGION_FRAC, "adjacentOverlap": ADJACENT_OVERLAP,
             "segments": max(r["segmentId"] for r in recs) + 1, "collapseDrops": collapse_drops,
+            "minTextScore": min_text_score,
         },
         "frameCount": len(manifest_frames), "transcriptSegmentCount": seg_count,
         "frames": manifest_frames,

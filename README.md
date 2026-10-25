@@ -85,3 +85,25 @@ uvicorn app.main:app --port 8000
 ```
 
 See **[APPROACH.md](APPROACH.md)** for the architecture deep-dive and **[PLAN.md](PLAN.md)** for the build log.
+
+## Optional OCR threshold
+
+The frame pipeline, demo note, and default text gate are Yuning Zhang's original project. The default is unchanged: a representative is a vision candidate when its OCR score is at least **8**.
+
+`--min-text-score` is an opt-in positive integer. It does not change representative frame ids, timestamps, provenance, or deduplication. It only changes which of those representatives are sent to vision. Omit the flag and each step uses 8, or a threshold already recorded by the previous step. An explicit flag overrides a recorded one. `build_visual_blocks.py` reads the committed `frame_analysis.json`, not an analyze `--output` side file, so pass the flag there too. If the manifest and `frame_analysis.json` record different thresholds, that command stops instead of mixing them.
+
+```bash
+# Record the gate in a fresh representative pack (still writes every representative).
+python scripts/create_demo_artifacts.py --min-text-score 4
+
+# Gate the committed representatives without rewriting frame_analysis.json.
+python scripts/analyze_demo_frames.py --min-text-score 4 --output work/frame_analysis_t4.json
+
+# Vision step. Reads stored OCR scores. Refuses to overwrite the committed blocks
+# unless you pass --output. This calls the vision API for uncached candidates.
+python scripts/build_visual_blocks.py --min-text-score 4 --output work/visual_blocks_t4.json
+```
+
+On this demo's 93 representatives, the stored scores select 36 candidates at 8, 45 at 4, and 52 at 2. That is 0, 9, and 16 additional vision calls. Among the 16 frames the default gate misses, a preliminary single-video review marked 8 as useful diagrams and 7 as titles, transitions, blanks, or end cards. Threshold 4 selects 4 of those 8 diagrams and 4 of those 7 irrelevant frames. Threshold 2 selects all 8 diagrams and all 7 irrelevant frames. One further frame in that set of 16 was marked as a possible software demo; thresholds 4 and 2 select it, and 8 does not.
+
+These counts are candidate-selection counts. They are not a measurement of generated-note quality. The labels are preliminary, cover one video, and do not label the 36 frames the original gate already kept. Offline comparison: `python experiments/ocr_threshold/compare.py`. Details of a rejected diagram-detector attempt are in `experiments/diagram_fallback/report.md`.

@@ -46,6 +46,31 @@ CONF_FLOOR = 40               # Tesseract per-word confidence floor for a "real"
 MIN_TEXT_SCORE = 8            # confident-word count a representative needs to be a candidate
 
 
+def require_min_text_score(value: int) -> int:
+    """Accept a positive integer threshold. The default gate remains 8."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("min text score must be a positive integer")
+    return value
+
+
+def resolve_min_text_score(cli_value: int | None = None, recorded: int | None = None) -> int:
+    """CLI override, else a threshold recorded by the previous step, else 8."""
+    if cli_value is not None:
+        return require_min_text_score(cli_value)
+    if recorded is not None:
+        return require_min_text_score(recorded)
+    return MIN_TEXT_SCORE
+
+
+def passes_text_gate(text_score: int, min_text_score: int = MIN_TEXT_SCORE) -> bool:
+    """True when a representative's confident-word count clears the text gate.
+
+    The default threshold is ``MIN_TEXT_SCORE`` (8). A caller comparing thresholds
+    may pass another positive integer; omitting it leaves pipeline behavior unchanged.
+    """
+    return int(text_score) >= require_min_text_score(min_text_score)
+
+
 def phash_distance(a: str, b: str) -> int:
     """Hamming distance between two phash hex strings (popcount of the XOR).
 
