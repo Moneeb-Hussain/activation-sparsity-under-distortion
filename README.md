@@ -1,109 +1,147 @@
-# Visual Notes from Video
+# Sparse-Text Frame Recovery
 
-> Turn a visually-dense video — a conference talk, a coding tutorial, a lecture — into structured notes where the on-screen content (code, tables, diagrams) is extracted, and **every point links back to the exact frame it came from, so you can verify it.**
+Evaluating and improving the selection of low-text visual frames in AI-generated video notes.
 
-▶️ Demo video (5:36): https://youtu.be/3rRKfdJwtw8
+## Project origin
 
-[![Watch the demo](https://img.youtube.com/vi/3rRKfdJwtw8/maxresdefault.jpg)](https://youtu.be/3rRKfdJwtw8)
+This repository is a fork of [yuningzhang520/ai-video-notes](https://github.com/yuningzhang520/ai-video-notes).
 
-**Live demo:** https://luma-video-notes.onrender.com
+The original system is by Yuning Zhang. It turns a visually dense video into topic-segmented notes, extracts on-screen code, tables, diagrams, and text, and links each grounded point to a source frame or transcript timestamp.
 
----
+This fork contains independent improvements to the OCR text gate, plus an offline evaluation of candidate-frame coverage and processing cost. The original system remains credited to Yuning Zhang.
 
-## The problem
+The evaluation uses the original project's committed AI agent design patterns demo (GDm_uH6VxPY), containing 93 representative frames.
 
-Most video summarizers are transcript-first. For a talking-head video that's fine — the audio carries the meaning. But the videos people actually take notes on — technical talks, tutorials, lectures — the screen carries what the speaker never says out loud: the exact code, the numbers in a table, the structure of a diagram. Transcript-only tools drop all of that silently, so the notes read complete while missing the one thing you opened the video for.
+## Problem
 
-## What I built
+The original pipeline samples frames, collapses them to one representative per on-screen state, and then applies an OCR text gate. The score is the number of Tesseract words whose confidence is at least 40. The default gate keeps a representative only when that score is at least 8.
 
-A tool that does two things differently:
+That rule skips many talking-head frames. It can also skip a diagram, title, or sparse slide that has fewer than 8 confident words. These frames are excluded from visual extraction, potentially leaving important diagram content unavailable to the generated notes.
 
-- **It spends vision where it counts.** Instead of summarizing the transcript, it extracts the on-screen content the audio doesn't carry — and only on the frames that actually have it.
-- **It makes every point verifiable.** Each grounded point links to the exact frame (or transcript moment) it came from. Click it, and the embedded video seeks to that moment and shows the source — so you can catch the model when it's wrong, instead of just trusting a summary.
+On the committed demo pack (`data/demo/GDm_uH6VxPY/frame_analysis.json`), `frame-0012` is a representative at 75.0 seconds. Its OCR score is 6, so the default gate marks it `isVisionCandidate: false` with the reason "only 6 confident words (< 8)". A preliminary review of frames missed by that gate labeled `frame-0012` as a useful diagram. Representative ids, timestamps, image paths, and deduplication are unchanged by the work below. Only the candidate decision changes.
 
-The result is a note you can skim, expand, and fact-check — not a wall of text you have to take on faith.
+## My contributions
 
-## Who it's for
+- A configurable OCR threshold. The default remains 8, so an unmodified run matches the original candidate set. `--min-text-score` accepts a positive integer.
+- The same threshold is used by `scripts/create_demo_artifacts.py`, `scripts/analyze_demo_frames.py`, and `scripts/build_visual_blocks.py`. Lowering it does not drop representatives. It only changes which representatives are vision candidates.
+- Stale-configuration checks in the vision step. With no flag, `scripts/build_visual_blocks.py` stops if `manifest.json` and `frame_analysis.json` record different thresholds, or if a stored `isVisionCandidate` flag disagrees with the stored score at the recorded gate. An explicit `--min-text-score` overrides the recorded value and re-selects from the stored scores. A non-default run will not overwrite the committed `frame_analysis.json` or `visual_blocks.json` unless `--output` is set. The vision script reads the committed `frame_analysis.json`, not an analyze `--output` side file.
+- Automated tests for the default, the boundaries at 8, 4, 2, and 1, invalid values, and agreement between the stored flags and `textScore`.
+- An offline comparison of thresholds 8, 4, and 2 that reads stored scores only.
+- A documented OpenCV diagram-detector experiment. It was removed from the production path, tests, CLI, and `requirements.txt` after evaluation. The result is `experiments/diagram_fallback/report.md`.
 
-Anyone who learns from dense video and needs the details to be right: engineers following a technical talk, students working through a lecture, anyone who takes notes on a tutorial and needs the actual code, not a paraphrase. The product is built around trust — you can always see the screen the model read.
+## Experimental results
 
-## See it in action
+Source: the 93 representatives in `data/demo/GDm_uH6VxPY/frame_analysis.json`. Counts below are vision candidates, which means additional model calls if those frames are not already cached. They are not a measure of note quality.
 
-The demo runs on a Google Cloud talk about AI agent design patterns — a slide-dense, code-heavy video that's exactly the kind transcript-only tools fail on.
+| Threshold | Candidates | Additional vision calls |
+|---:|---:|---:|
+| 8 | 36 | 0 |
+| 4 | 45 | +9 |
+| 2 | 52 | +16 |
 
-- **Click-to-verify** — tap any point; the video seeks to that moment and the source frame appears.
-- **Two grounding tiers** — visual points show the source frame; spoken points show the transcript moment. Nothing is faked: a point with no real source is shown but never presented as verified.
-- **Confidence as triage** — the riskiest extractions are flagged so you check those first.
+A preliminary review labeled 16 frames that the default gate misses: 8 useful diagrams, 7 irrelevant frames (titles, transitions, blanks, or end cards), and 1 possible software demo. The other frames, including the original 36 candidates, were not labeled.
 
----
+| Threshold | Labeled diagrams from the missed set | Labeled irrelevant frames | Possible software demo |
+|---:|---:|---:|---:|
+| 8 | 0/8 | 0/7 | 0/1 |
+| 4 | 4/8 | 4/7 | 1/1 |
+| 2 | 8/8 | 7/7 | 1/1 |
 
-## How it works
+These labels come from one video. The diagram fraction is only the share of those 8 missed frames, not overall recall, and not evidence that the generated note is better. Selecting a frame means it would be sent to vision.
 
-A batch pipeline — process a video once, then read. In order:
+The diagram detector was applied only to scores 2 through 7, on top of the default gate. It produced 38 candidates (+2), selected 2 of the 8 labeled diagrams (`frame-0011`, `frame-0012`), and selected none of the 7 labeled irrelevant frames. That tradeoff was not good enough to keep. Feature rows are in `experiments/diagram_fallback/sparse_frame_features.csv`.
 
-1. **Ingest** — pull the transcript (captions) and densely sample frames.
-2. **Select** — collapse the dense frames to one representative per on-screen state, deterministically (no model deciding what to look at).
-3. **Gate** — a cheap on-screen-text check decides which frames are worth vision; talking-head frames the transcript already covers are skipped.
-4. **Vision** — a vision model extracts the salient artifact (code, table, diagram, text) from each gated frame, one block per frame.
-5. **Structure** — one LLM pass organizes everything into topic sections with grounded bullets; deterministic assembly builds the final note from the extracted blocks, carried verbatim.
-6. **Render** — a hierarchical reader with click-to-verify against the embedded player.
-
-### Pipeline overview
-
-Dense samples are compared with a cropped perceptual hash (pHash), so static slides and UI states collapse without letterboxing or player chrome skewing the result. An OCR-superset collapse then removes frames whose text is contained in a more complete capture, and an on-screen-text gate sends only the remaining text-bearing representatives to vision.
-
-## Architecture & key decisions
-
-The full write-up — decisions, trade-offs, what breaks first, what I'd build next — is in **[APPROACH.md](APPROACH.md)**. The decisions I'm most proud of:
-
-- **Explicit frame pipeline, not native video ingestion.** Handing the whole video to a multimodal model is simpler, but it loses frame-level provenance — the model can claim a timestamp I can't verify. Verifiable grounding is the whole point, so every extracted point carries the frame that produced it.
-
-- **The model does the judgment; the plumbing stays deterministic.** Reading frames and structuring the note is the model's job. Deciding *which* frames to look at is not — I considered an LLM router and rejected it (an inference call to route costs about what it saves and adds a failure point). Routing runs on cheap, deterministic signals instead, which is also what keeps every point traceable.
-
-- **A real-world deployment constraint, handled honestly.** Live YouTube fetch works locally but is blocked from a datacenter IP (a bot-wall). Rather than hide that behind proxies a reviewer couldn't reproduce, the deployed demo serves a real note pre-built from committed frames and transcript — and the constraint is documented as the first thing to solve for production.
-
-- **Verification is the failure-mode design.** Vision will misread frames, so the design assumes it: every point is click-to-verify, the riskiest are flagged, and the source frame is always one click away as the ground truth.
-
-## A concrete example of *why* this approach
-
-On one frame, the OCR text gate read a class name as `Parallet-Agent` — garbled. The vision model read it correctly as `ParallelAgent`. Extracted text can be wrong, which is exactly why the source frame is always shown: the user is never blind to what the model actually saw.
-
-## Built with
-
-Python · FastAPI · Claude (vision + structuring) · a lightweight plain-HTML/CSS/JS reader with the embedded video player · ffmpeg / perceptual hashing / OCR for frame selection.
-
-## Running it
+Regenerate the threshold table with:
 
 ```bash
-# Docker (one command)
-docker compose up        # then open http://localhost:8000
+python experiments/ocr_threshold/compare.py
+```
 
-# Or locally
+That command rewrites `experiments/ocr_threshold/report.md` from the committed scores. It does not call a paid API.
+
+## Reproducibility
+
+Offline evaluation and the test suite do not need an Anthropic key, a YouTube download, or a vision call. They do need the Python packages in `requirements.txt`, because `app/frame_select.py` imports them. The Tesseract binary is not required for the comparison script: it reads stored `textScore` values.
+
+From the repository root:
+
+```bash
+python -m pip install -r requirements.txt
+python experiments/ocr_threshold/compare.py
+python -m pytest
+```
+
+`python -m pytest` collects the modules under `tests/`, including `tests/test_text_gate_threshold.py`.
+
+To record or apply a non-default gate without replacing committed artifacts:
+
+```bash
+python scripts/analyze_demo_frames.py --min-text-score 4 --output work/frame_analysis_t4.json
+```
+
+`work/` is gitignored. The command reads stored `textScore` values from `data/demo/GDm_uH6VxPY/manifest.json`, checks that each frame file exists, and writes a new analysis file. It does not rerun OCR and does not call a vision API.
+
+The candidate counts in the table come from `experiments/ocr_threshold/compare.py`. These two commands were not run for that table. The first reuses a video already in `work/` and otherwise downloads it, then reruns sampling and OCR and replaces the committed representative frames. The second calls the vision API for candidates that are not already cached:
+
+```bash
+python scripts/create_demo_artifacts.py --min-text-score 4
+python scripts/build_visual_blocks.py --min-text-score 4 --output work/visual_blocks_t4.json
+```
+
+Pass the same `--min-text-score` to each stage you actually run. The vision script does not read `work/frame_analysis_t4.json`.
+
+The rejected diagram-detector experiment is documented in experiments/diagram_fallback/report.md, with supporting measurements in experiments/diagram_fallback/sparse_frame_features.csv. The experimental implementation is not included in this fork.
+
+## Original application
+
+The sections below describe Yuning Zhang's system. The threshold work above does not change the reader, the committed demo note, or the default gate of 8.
+
+Most transcript-first summarizers drop what the screen shows: code, table numbers, and diagram structure. This application extracts that on-screen content and makes each grounded point click-to-verify in an embedded player. A point with no source is shown, but not presented as verified. Low-confidence extractions are flagged for review.
+
+Yuning Zhang's README describes the running demo as a slide-dense Google Cloud talk on AI agent design patterns. The committed pack for that reader is `GDm_uH6VxPY`: 93 representative frames selected from a 250-frame sample, with 36 vision candidates at the default gate. The embedded player in `static/app.js` uses this same ID.
+
+### Pipeline
+
+1. Ingest the transcript and densely sample frames.
+2. Select one representative per on-screen state with a cropped perceptual hash. No model chooses which frames to inspect.
+3. Gate on on-screen text. The default keeps representatives with at least 8 confident words.
+4. Run vision on each gated frame. At most one block per frame: code, table, diagram, or text.
+5. Structure the extracted blocks into topic sections. Bullets keep their frame or transcript source.
+6. Render a hierarchical reader. A click seeks the embedded player to the cited moment.
+
+Dense samples are compared with a cropped perceptual hash so letterboxing and player chrome do not define a scene change. Adjacent frames whose OCR text is contained in a more complete capture are collapsed. The text gate then decides which remaining representatives go to vision.
+
+Design notes, including the rejection of an LLM frame router and the datacenter YouTube fetch limit, are in [APPROACH.md](APPROACH.md). The build log is in [PLAN.md](PLAN.md).
+
+One committed frame shows why the source image stays available: OCR read a class name as `Parallet-Agent`, and the vision model read it as `ParallelAgent`.
+
+Stack: Python, FastAPI, Claude for build-time vision and structuring, a plain HTML/CSS/JS reader, and ffmpeg, perceptual hashing, and OCR for frame selection. The running server reads committed artifacts and does not call Anthropic.
+
+### Run the original reader
+
+Docker, from the repository root:
+
+```bash
+docker compose up
+```
+
+Then open http://localhost:8000. The service definition is `docker-compose.yml`. Runtime needs no API key.
+
+Locally:
+
+```bash
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --port 8000
 ```
 
-See **[APPROACH.md](APPROACH.md)** for the architecture deep-dive and **[PLAN.md](PLAN.md)** for the build log.
+The image and the local app expect ffmpeg and Tesseract when you re-run ingest or OCR. See the `Dockerfile`. Optional build-time reruns of vision and structuring read `ANTHROPIC_API_KEY` from the environment or `.env`. Copy `.env.example` if you do that. Do not commit `.env`.
 
-## Optional OCR threshold
+## Limitations and future work
 
-The frame pipeline, demo note, and default text gate are Yuning Zhang's original project. The default is unchanged: a representative is a vision candidate when its OCR score is at least **8**.
-
-`--min-text-score` is an opt-in positive integer. It does not change representative frame ids, timestamps, provenance, or deduplication. It only changes which of those representatives are sent to vision. Omit the flag and each step uses 8, or a threshold already recorded by the previous step. An explicit flag overrides a recorded one. `build_visual_blocks.py` reads the committed `frame_analysis.json`, not an analyze `--output` side file, so pass the flag there too. If the manifest and `frame_analysis.json` record different thresholds, that command stops instead of mixing them.
-
-```bash
-# Record the gate in a fresh representative pack (still writes every representative).
-python scripts/create_demo_artifacts.py --min-text-score 4
-
-# Gate the committed representatives without rewriting frame_analysis.json.
-python scripts/analyze_demo_frames.py --min-text-score 4 --output work/frame_analysis_t4.json
-
-# Vision step. Reads stored OCR scores. Refuses to overwrite the committed blocks
-# unless you pass --output. This calls the vision API for uncached candidates.
-python scripts/build_visual_blocks.py --min-text-score 4 --output work/visual_blocks_t4.json
-```
-
-On this demo's 93 representatives, the stored scores select 36 candidates at 8, 45 at 4, and 52 at 2. That is 0, 9, and 16 additional vision calls. Among the 16 frames the default gate misses, a preliminary single-video review marked 8 as useful diagrams and 7 as titles, transitions, blanks, or end cards. Threshold 4 selects 4 of those 8 diagrams and 4 of those 7 irrelevant frames. Threshold 2 selects all 8 diagrams and all 7 irrelevant frames. One further frame in that set of 16 was marked as a possible software demo; thresholds 4 and 2 select it, and 8 does not.
-
-These counts are candidate-selection counts. They are not a measurement of generated-note quality. The labels are preliminary, cover one video, and do not label the 36 frames the original gate already kept. Offline comparison: `python experiments/ocr_threshold/compare.py`. Details of a rejected diagram-detector attempt are in `experiments/diagram_fallback/report.md`.
+- The evaluation is a single-video pilot, `GDm_uH6VxPY`.
+- The 8 diagrams, 7 irrelevant frames, and 1 possible software demo are preliminary labels, not validated ground truth. The original 36 candidates were not labeled.
+- Every extra candidate can add a build-time vision call. Threshold 4 adds 9. Threshold 2 adds 16.
+- Generated notes were not rebuilt or compared, so candidate counts do not show a better note.
+- The OpenCV diagram detector recovered 2 of the 8 labeled diagrams and was removed. A later detector would need evidence on more than this video before it belongs in the default path.
+- A useful next measurement is a multi-video labeled set, plus a comparison of the notes actually produced at thresholds 8, 4, and 2.
